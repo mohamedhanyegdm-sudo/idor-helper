@@ -99,6 +99,52 @@ Body similarity: 100.0%
 
 The saved report includes a "Changed JSON fields" section (here only `created_at`, which is volatile).
 
+## Validation on a local lab
+
+`lab/vulnerable_app.py` is a small Flask API that is vulnerable to IDOR on purpose. It exists so the tool can be validated end to end against a real local target instead of pasted samples. It binds to `127.0.0.1` only; never deploy it or expose it on a network.
+
+The lab has two demo users (1 and 2). `GET /api/users/<id>/profile` checks only that someone is logged in, not that the requester owns the profile, so user 1 can read user 2's profile. `GET /api/v2/users/<id>/profile` is the fixed version and returns `403` for anyone but the owner.
+
+Run it and capture two responses (these captures are committed in `lab/captures/`):
+
+```bash
+python lab/vulnerable_app.py &
+curl -c cookies.txt http://127.0.0.1:5001/login/1
+curl -i -b cookies.txt http://127.0.0.1:5001/api/users/1/profile > lab/captures/response_own.txt
+curl -i -b cookies.txt http://127.0.0.1:5001/api/users/2/profile > lab/captures/response_idor.txt
+```
+
+Both responses are HTTP 200. Only the account context reveals the problem: user 1's session received user 2's record. Comparing the captures:
+
+```bash
+python -m idor_helper.cli lab/captures/response_own.txt lab/captures/response_idor.txt --report lab/captures/report_idor.md
+```
+
+```text
+Assessment: Inconclusive - manual authorization review required
+Status: 200 vs 200
+Body similarity: 90.5%
+- Both responses returned HTTP 200; verify whether the requester was authorized to access the represented object.
+- Successful responses contain fields that look sensitive (email, phone); confirm the requester may see them.
+- The responses reference different email addresses (masked in this report); check whether one belongs to another account.
+- Response A has no 'no-store' or 'private' Cache-Control; authenticated data may be cacheable.
+- Response B has no 'no-store' or 'private' Cache-Control; authenticated data may be cacheable.
+Report saved to: lab/captures/report_idor.md
+```
+
+The saved report's "Changed JSON fields" section lists every identity field (`user_id`, `username`, `email`, `phone`, `full_name`), which is what an analyst expects when one endpoint returns two different users' objects.
+
+The fixed endpoint shows the expected contrast:
+
+```bash
+curl -i -b cookies.txt http://127.0.0.1:5001/api/v2/users/2/profile > lab/captures/response_blocked.txt
+python -m idor_helper.cli lab/captures/response_own.txt lab/captures/response_blocked.txt
+```
+
+This reports `Review required - different access outcomes` (200 vs 403), the expected result once object-level authorization is enforced.
+
+This is a synthetic local demo. It confirms the tool's checks fire on a real IDOR-shaped capture; it says nothing about the security of any other application.
+
 ## Tests
 
 ```bash
@@ -124,9 +170,13 @@ idor-helper/
 │   ├── checks.py
 │   └── cli.py
 ├── examples/
+├── lab/
+│   ├── vulnerable_app.py
+│   └── captures/
 ├── tests/
 │   ├── test_analyzer.py
-│   └── test_checks.py
+│   ├── test_checks.py
+│   └── test_lab.py
 ├── requirements.txt
 └── README.md
 ```
